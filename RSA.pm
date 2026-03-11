@@ -5,10 +5,7 @@ use warnings;
 
 use Carp;    # Removing carp will break the XS code.
 
-our $VERSION = '0.33';
-
-our $AUTOLOAD;
-use AutoLoader 'AUTOLOAD';
+our $VERSION = '0.37';
 
 use XSLoader;
 XSLoader::load 'Crypt::OpenSSL::RSA', $VERSION;
@@ -19,6 +16,34 @@ BEGIN {
         require Crypt::OpenSSL::Bignum;
     };
 }    ## no critic qw(RequireCheckingReturnValueOfEval);
+
+sub new_public_key {
+    my ( $proto, $p_key_string ) = @_;
+    if ( $p_key_string =~ /^-----BEGIN RSA PUBLIC KEY-----/ ) {
+        return $proto->_new_public_key_pkcs1($p_key_string);
+    }
+    elsif ( $p_key_string =~ /^-----BEGIN PUBLIC KEY-----/ ) {
+        return $proto->_new_public_key_x509($p_key_string);
+    }
+    else {
+        croak "unrecognized key format";
+    }
+}
+
+sub new_key_from_parameters {
+    my ( $proto, $n, $e, $d, $p, $q ) = @_;
+    return $proto->_new_key_from_parameters( map { $_ ? $_->pointer_copy() : 0 } $n, $e, $d, $p, $q );
+}
+
+sub import_random_seed {
+    until ( _random_status() ) {
+        _random_seed( Crypt::OpenSSL::Random::random_bytes(20) );
+    }
+}
+
+sub get_key_parameters {
+    return map { $_ ? Crypt::OpenSSL::Bignum->bless_pointer($_) : undef } shift->_get_key_parameters();
+}
 
 1;
 
@@ -55,6 +80,15 @@ Crypt::OpenSSL::RSA - RSA encoding and decoding, using the openSSL libraries
   $signature = $rsa_priv->sign($plaintext);
   print "Signed correctly\n" if ($rsa->verify($plaintext, $signature));
 
+=head1 SECURITY
+
+Version 0.35 makes the use of PKCS#1 v1.5 padding a fatal error.  It is
+very difficult to implement PKCS#1 v1.5 padding securely.  If you are still
+using RSA in in general, you should be looking at alternative encryption
+algorithms.  Version 0.36 implements RSA-PSS padding (PKCS#1 v2.1) and makes
+setting an invalid padding a fatal error.  Note, PKCS1_OAEP can only be used
+for encryption and PKCS1_PSS can only be used for signing.
+
 =head1 DESCRIPTION
 
 C<Crypt::OpenSSL::RSA> provides the ability to RSA encrypt strings which are
@@ -80,19 +114,9 @@ C<-----BEGIN...-----> and C<-----END...-----> lines.
 The padding is set to PKCS1_OAEP, but can be changed with the
 C<use_xxx_padding> methods.
 
-=cut
-sub new_public_key {
-    my ( $proto, $p_key_string ) = @_;
-    if ( $p_key_string =~ /^-----BEGIN RSA PUBLIC KEY-----/ ) {
-        return $proto->_new_public_key_pkcs1($p_key_string);
-    }
-    elsif ( $p_key_string =~ /^-----BEGIN PUBLIC KEY-----/ ) {
-        return $proto->_new_public_key_x509($p_key_string);
-    }
-    else {
-        croak "unrecognized key format";
-    }
-}
+Note, PKCS1_OAEP can only be used for encryption.  You must specifically
+call use_pkcs1_pss_padding (or use_pkcs1_pss_padding) prior to signing
+operations.
 
 =item new_private_key
 
@@ -130,24 +154,11 @@ provided and d is undef, d is computed.  Note that while p and q are
 not necessary for a private key, their presence will speed up
 computation.
 
-=cut
-sub new_key_from_parameters {
-    my ( $proto, $n, $e, $d, $p, $q ) = @_;
-    return $proto->_new_key_from_parameters( map { $_ ? $_->pointer_copy() : 0 } $n, $e, $d, $p, $q );
-}
-
 =item import_random_seed
 
 Import a random seed from L<Crypt::OpenSSL::Random>, since the OpenSSL
 libraries won't allow sharing of random structures across perl XS
 modules.
-
-=cut
-sub import_random_seed {
-    until ( _random_status() ) {
-        _random_seed( Crypt::OpenSSL::Random::random_bytes(20) );
-    }
-}
 
 =back
 
@@ -230,6 +241,27 @@ Sign a string using the secret (portion of the) key.
 
 Check the signature on a text.
 
+=back
+
+=head1 Padding Methods
+
+Versions prior to 0.35 allowed using pkcs1 padding for both encryption
+and signature operations but has been disabled for security reasons.
+
+While B<use_no_padding> can be used for encryption or signature operations
+B<use_pkcs1_pss_padding> is used for signature operations and
+B<use_pkcs1_oaep_padding> is used for encryption operations.
+
+Version 0.38 sets the appropriate padding for each operation unless
+B<use_no_padding> is called before either operation.
+
+B<Note:> while C<pkcs1-pss> is the effective replacement for <pkcs1> your
+use case may require some additional steps.  JSON Web Tokens (JWT) for
+instance require the algorithm to be changed from "RS256" for "pkcs1"
+(SHA1256) to "PS256" for "pkcs1-pss" (SHA-256 and MGF1 with SHA-256)
+
+=over
+
 =item use_no_padding
 
 Use raw RSA encryption. This mode should only be used to implement
@@ -238,15 +270,28 @@ Encrypting user data directly with RSA is insecure.
 
 =item use_pkcs1_padding
 
-Use PKCS #1 v1.5 padding. This currently is the most widely used mode
-of padding.
+PKCS #1 v1.5 padding has been disabled as it is nearly impossible to use this
+padding method in a secure manner.  It is known to be vulnerable to timing
+based side channel attacks.  use_pkcs1_padding() results in a fatal error.
+
+L<Marvin Attack|https://github.com/tomato42/marvin-toolkit/blob/master/README.md>
 
 =item use_pkcs1_oaep_padding
 
 Use C<EME-OAEP> padding as defined in PKCS #1 v2.0 with SHA-1, MGF1 and
 an empty encoding parameter. This mode of padding is recommended for
 all new applications.  It is the default mode used by
-C<Crypt::OpenSSL::RSA>.
+C<Crypt::OpenSSL::RSA> but is only valid for encryption/decryption.
+
+=item use_pkcs1_pss_padding
+
+Use C<RSA-PSS> padding as defined in PKCS#1 v2.1.  In general, RSA-PSS
+should be used as a replacement for RSA-PKCS#1 v1.5.  The module specifies
+the message digest being requested and the appropriate mgf1 setting and
+salt length for the digest.
+
+B<Note>: RSA-PSS cannot be used for encryption/decryption and results in a
+fatal error.  Call C<use_pkcs1_oaep_padding> for encryption operations. 
 
 =item use_sslv23_padding
 
@@ -254,6 +299,12 @@ Use C<PKCS #1 v1.5> padding with an SSL-specific modification that
 denotes that the server is SSL3 capable.
 
 Not available since OpenSSL 3.
+
+=back
+
+=head1 Hash/Digest Methods
+
+=over
 
 =item use_md5_hash
 
@@ -324,11 +375,6 @@ C<Crypt::OpenSSL::Bignum> module must be installed for this to work.
 =item is_private
 
 Return true if this is a private key, and false if it is private only.
-
-=cut
-sub get_key_parameters {
-    return map { $_ ? Crypt::OpenSSL::Bignum->bless_pointer($_) : undef } shift->_get_key_parameters();
-}
 
 =back
 
