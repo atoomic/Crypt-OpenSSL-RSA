@@ -204,14 +204,11 @@ EVP_MD *get_md_bynid(int hash_method)
     }
 }
 #endif
-unsigned char* get_message_digest(SV* text_SV, int hash_method)
+unsigned char* get_message_digest(SV* text_SV, int hash_method, unsigned char* md)
 {
     STRLEN text_length;
     unsigned char* text;
-    unsigned char *md;
-    static unsigned char m[EVP_MAX_MD_SIZE];
     text = (unsigned char*) SvPV(text_SV, text_length);
-    md = m;
 
     switch(hash_method)
     {
@@ -977,6 +974,7 @@ sign(p_rsa, text_SV)
   PREINIT:
     UNSIGNED_CHAR *signature;
     unsigned char* digest;
+    unsigned char digest_buf[EVP_MAX_MD_SIZE];
     SIZE_T_UNSIGNED_INT signature_length;
   CODE:
 {
@@ -986,7 +984,7 @@ sign(p_rsa, text_SV)
     }
     CHECK_NEW(signature, EVP_PKEY_get_size(p_rsa->rsa), UNSIGNED_CHAR);
 
-    CHECK_OPEN_SSL(digest = get_message_digest(text_SV, p_rsa->hashMode));
+    CHECK_OPEN_SSL(digest = get_message_digest(text_SV, p_rsa->hashMode, digest_buf));
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     EVP_PKEY_CTX *ctx;
     ctx = EVP_PKEY_CTX_new(p_rsa->rsa, NULL /* no engine */);
@@ -1044,6 +1042,7 @@ PPCODE:
 {
     unsigned char* sig;
     unsigned char* digest;
+    unsigned char digest_buf[EVP_MAX_MD_SIZE];
     STRLEN sig_length;
 
     sig = (unsigned char*) SvPV(sig_SV, sig_length);
@@ -1052,7 +1051,7 @@ PPCODE:
         croak("Signature longer than key");
     }
 
-    CHECK_OPEN_SSL(digest = get_message_digest(text_SV, p_rsa->hashMode));
+    CHECK_OPEN_SSL(digest = get_message_digest(text_SV, p_rsa->hashMode, digest_buf));
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     EVP_PKEY_CTX *ctx;
     ctx = EVP_PKEY_CTX_new(p_rsa->rsa, NULL /* no engine */);
